@@ -12,14 +12,17 @@ model = init_chat_model("gemini-2.5-flash", model_provider="google_genai")
 composio = Composio(provider=LangchainProvider())
 
 
+def tool_s():
+    tool_list = composio.tools.get(
+        user_id="0000-0000-0000",  # replace with your composio user_id
+        tools=["TEXT_TO_PDF_CONVERT_TEXT_TO_PDF", "GMAIL_SEND_EMAIL", "GOOGLEDRIVE_UPLOAD_FILE"]
+    )
+    return tool_list
 
-tool_list = composio.tools.get(
-    user_id="0000-0000-0000",  # replace with your composio user_id
-    tools=["TEXT_TO_PDF_CONVERT_TEXT_TO_PDF", "GMAIL_SEND_EMAIL", "GOOGLEDRIVE_UPLOAD_FILE"]
-)
+tools_list = tool_s()
 
 # Bind tools with the model
-llm_with_tools = model.bind_tools(tool_list)
+llm_with_tools = model.bind_tools(tools_list)
 
 def document_sender(state: AgentState):
     """
