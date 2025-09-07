@@ -6,10 +6,10 @@ from datetime import datetime, timedelta
 import uuid
 from state import AgentState
 from models.quotedetail import GeneratedQuote,SupplierQuoteOption, LogisticsCost
-# from app.models.supplierdetail import Supplier
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 
 # Initialize the model
@@ -345,10 +345,6 @@ def generate_quote(state: AgentState) -> dict:
     
     # Step 5: Generate quote document (markdown format for now)
     quote_document = generate_quote_document(quote_result, extracted_params)
-
-    print('-----------')
-    print(quote_document)
-    print('-----------')
     
     # Step 6: Create assistant response
     best_supplier = supplier_options[0] if supplier_options else None
@@ -374,20 +370,11 @@ The complete quote document has been prepared with {len(supplier_options)} suppl
         "quote_id": quote_result.quote_id,
         "supplier_options": [option.model_dump() for option in supplier_options],
         "estimated_savings": quote_result.estimated_savings,
-        "messages": [{"role": "assistant", "content": assistant_message}],
+        "messages1": [assistant_message],
         "next_step": "send_output_to_user",
         "status": "quote_generated"
     }
         
-    # except Exception as e:
-    #     error_message = f"Error generating quote: {str(e)}"
-    #     return {
-    #         "error": str(e),
-    #         "messages": [{"role": "assistant", "content": error_message}],
-    #         "next_step": "handle_error",
-    #         "status": "error"
-    #     }
-    
 
 def generate_quote_document(quote: GeneratedQuote, extracted_params: Dict) -> str:
     """

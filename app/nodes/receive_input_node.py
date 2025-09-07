@@ -5,7 +5,7 @@ from datetime import datetime
 from state import AgentState
 import uuid
 
-# # Pydantic Models for structured data # might be use later
+# # Pydantic Models for structured data
 # class UserMessage(BaseModel):
 #     """Model for incoming user messages"""
 #     user_id: str = Field(..., description="Unique identifier for the trader/company")

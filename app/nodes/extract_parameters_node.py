@@ -1,8 +1,6 @@
-from typing import Dict, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 from models.fabric_detail import ExtractedRequest
 from langchain.prompts import ChatPromptTemplate
-import uuid
 from state import AgentState
 from dotenv import load_dotenv
 load_dotenv()
@@ -79,10 +77,10 @@ def extract_parameters(state: AgentState) -> dict:
 
         updates = {
             'extracted_parameters' : extraction_result.model_dump(),
-            'messages': [{"role": "assistant", "content" : assistant_message}],
+            'messages1': [assistant_message],
             'needs_clarification': extraction_result.needs_clarification,
             'clarification_questions': extraction_result.clarification_questions,
-            'missing_info': extraction_result.missing_info
+            'missing_info': extraction_result.missing_info,
         }
         return updates
 
@@ -90,5 +88,5 @@ def extract_parameters(state: AgentState) -> dict:
         # Handle errors gracefully
         return {
             "error": str(e),
-            "messages": [{"role": "assistant", "content" : "Sorry, I encountered an error while processing your request."}]
+            "messages": ["Sorry, I encountered an error while processing your request."]
         }

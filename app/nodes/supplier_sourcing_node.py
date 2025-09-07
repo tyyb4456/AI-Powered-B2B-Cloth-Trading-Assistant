@@ -1,5 +1,4 @@
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.utilities.sql_database import SQLDatabase
 from langchain_core.prompts import ChatPromptTemplate
@@ -317,7 +316,7 @@ Provide strategic analysis and recommendations.""")
 # Initialize prompt template
 sourcing_prompt = create_sourcing_prompt()
 
-def supplier_sourcing(state: AgentState) -> dict:
+def supplier_sourcing(state: AgentState):
     """
     Node 4: supplier_sourcing - Multi-database supplier search and ranking
     
@@ -354,7 +353,9 @@ def supplier_sourcing(state: AgentState) -> dict:
         print(f"  - Certifications: {certifications}")
         print(f"  - Destination: {destination}")
         print(f"  - Urgency: {urgency}")
-        
+        print('--' * 10)
+
+
         # Step 1: Query internal database
         db = create_database_connection()
         internal_suppliers = query_internal_database(db, fabric_type, quantity, certifications)
@@ -467,7 +468,7 @@ def supplier_sourcing(state: AgentState) -> dict:
             "search_confidence": search_confidence,
             "market_insights": market_insights,
             "alternative_suggestions": search_result.alternative_suggestions,
-            "messages": [{"role": "assistant", "content": assistant_message}],
+            "messages1": [assistant_message],
             "next_step": next_step,
             "status": "suppliers_found"
         }

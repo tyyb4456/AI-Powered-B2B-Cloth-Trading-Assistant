@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 # Pydantic Models for structured data
 class Supplier(BaseModel):
     """Individual supplier recommendation with scoring details"""
+    
     supplier_id: str = Field(..., description="Unique supplier identifier")
     name: str = Field(..., description="Supplier company name")
     location: str = Field(..., description="Supplier location/country")
@@ -15,6 +16,7 @@ class Supplier(BaseModel):
     specialties: List[str] = Field(default_factory=list, description="Supplier specializations")
     certifications: List[str] = Field(default_factory=list, description="Available certifications")
     contact_info: Dict[str, str] = Field(default_factory=dict, description="Contact details")
+    # active : Optional[bool] # pending
     notes: Optional[str] = Field(None, description="Additional notes about this supplier")
     overall_score: float = Field(..., description="Weighted overall score", ge=0.0, le=100.0)
 
