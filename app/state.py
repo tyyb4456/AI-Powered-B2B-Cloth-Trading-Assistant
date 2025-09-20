@@ -5,7 +5,9 @@ from models.supplierdetail import SupplierSearchResult
 from models.quotedetail import GeneratedQuote
 from models.nagotiation_model import NegotiationStrategy, DraftedMessage
 from models.analyze_supplier_response_model import SupplierIntent, ExtractedTerms, NegotiationAnalysis
+from models.contract_model import DraftedContract, ContractTerms, ContractMetadata, ContractReview
 from datetime import datetime
+from models.esclation_model import EscalationSummary, HumanInterventionRequest
 
 
 class AgentState(TypedDict):
@@ -70,14 +72,23 @@ class AgentState(TypedDict):
     extracted_terms : ExtractedTerms
     negotiation_analysis : NegotiationAnalysis
     negotiation_advice : str
-    negotiation_history : dict
+    negotiation_history : List[dict]
     negotiation_status : str
     analysis_confidence : float
     last_analysis_timestamp : datetime
+
+    # esclation to human fields
+
+    escalation_summary : EscalationSummary
+    intervention_request : HumanInterventionRequest
     
-    # Persistence and workflow continuation fields
-    quote_sent: Optional[bool] = False
-    workflow_phase: Optional[str] = "initial"
-    awaiting_user_input: Optional[bool] = False
-    human_response: Optional[str] = None
-    
+    # contract drafting fields
+    drafted_contract : Optional[DraftedContract] = None
+    contract_terms : Optional[ContractTerms] = None
+    contract_metadata : Optional[ContractMetadata] = None
+    contract_id : Optional[str] = None
+    contract_ready : bool = False
+    contract_confidence : float = 0.0
+    contract_review : Optional[ContractReview] = None
+    requires_legal_review : bool = True
+    contract_generation_timestamp : Optional[datetime] = None

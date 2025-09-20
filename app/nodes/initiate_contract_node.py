@@ -1,1068 +1,637 @@
-from typing import Dict, Any, List, Optional, Literal
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from state import AgentState
+from models.contract_model import DraftedContract, ContractTerms, ContractMetadata
 from dotenv import load_dotenv
 import uuid
 from datetime import datetime, timedelta
-import logging
-# Configure logging for debugging conditional edge decisions
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import json
 
 load_dotenv()
 
-# Pydantic Models for contract structure
-class PartyDetails(BaseModel):
-    """Legal entity information for contract parties"""
-    legal_name: str = Field(..., description="Full legal name of the entity")
-    address: str = Field(..., description="Complete legal address")
-    contact_person: str = Field(..., description="Authorized signatory or contact")
-    email: str = Field(..., description="Primary business email")
-    phone: Optional[str] = Field(None, description="Business phone number")
-    tax_id: Optional[str] = Field(None, description="Tax identification number")
-    registration_number: Optional[str] = Field(None, description="Business registration number")
 
-class ProductSpecifications(BaseModel):
-    """Detailed product specifications for contract"""
-    fabric_type: str = Field(..., description="Type of fabric (cotton, silk, polyester, etc.)")
-    quantity: float = Field(..., description="Total quantity ordered")
-    unit: str = Field(..., description="Unit of measurement (meters, kg, etc.)")
-    quality_specifications: List[str] = Field(default_factory=list, description="Quality specs (GSM, certifications, etc.)")
-    color: Optional[str] = Field(None, description="Color specifications")
-    width: Optional[str] = Field(None, description="Fabric width specifications")
-    certifications: List[str] = Field(default_factory=list, description="Required certifications (GOTS, OEKO-TEX, etc.)")
-    technical_specs: Optional[str] = Field(None, description="Additional technical specifications")
-
-class CommercialTerms(BaseModel):
-    """Financial and commercial terms of the contract"""
-    unit_price: float = Field(..., description="Price per unit")
-    total_value: float = Field(..., description="Total contract value")
-    currency: str = Field(default="USD", description="Contract currency")
-    payment_terms: str = Field(..., description="Payment terms (Net 30, 50% advance, etc.)")
-    incoterms: str = Field(..., description="International commercial terms (FOB, CIF, etc.)")
-    price_validity: Optional[str] = Field(None, description="Price validity period")
-    taxes_and_duties: Optional[str] = Field(None, description="Tax and duty responsibilities")
-
-class DeliveryTerms(BaseModel):
-    """Logistics and delivery specifications"""
-    delivery_destination: str = Field(..., description="Final delivery destination")
-    lead_time_days: int = Field(..., description="Agreed lead time in days")
-    delivery_date: str = Field(..., description="Expected delivery date")
-    shipping_method: Optional[str] = Field(None, description="Preferred shipping method")
-    packaging_requirements: Optional[str] = Field(None, description="Special packaging needs")
-    inspection_terms: Optional[str] = Field(None, description="Quality inspection arrangements")
-
-class ContractAnomalies(BaseModel):
-    """Non-standard terms that require human review"""
-    non_standard_clauses: List[str] = Field(default_factory=list, description="Clauses that deviate from standard template")
-    special_conditions: List[str] = Field(default_factory=list, description="Unique conditions added during negotiation")
-    risk_factors: List[str] = Field(default_factory=list, description="Terms that may carry additional risk")
-    review_notes: List[str] = Field(default_factory=list, description="Specific items flagged for human review")
-    anomaly_score: float = Field(..., description="Overall deviation from standard contract (0.0 to 1.0)", ge=0.0, le=1.0)
-
-class ContractDraft(BaseModel):
-    """Complete contract draft with metadata"""
-    contract_id: str = Field(..., description="Unique contract identifier")
-    contract_title: str = Field(..., description="Contract title/description")
-    buyer: PartyDetails
-    seller: PartyDetails
-    product_specs: ProductSpecifications
-    commercial_terms: CommercialTerms
-    delivery_terms: DeliveryTerms
-    contract_text: str = Field(..., description="Complete contract text ready for review")
-    anomalies: ContractAnomalies
-    template_used: str = Field(..., description="Contract template identifier used")
-    creation_date: str = Field(..., description="Contract creation timestamp")
-    status: Literal["draft", "review_pending", "approved", "rejected"] = Field(default="draft")
-    review_priority: Literal["low", "medium", "high", "urgent"] = Field(..., description="Priority for human review")
-
-# Contract templates (in practice, these would be stored in a database or file system)
-CONTRACT_TEMPLATES = {
-    "international_textile": {
-        "name": "International Textile Purchase Agreement",
-        "template": """
-TEXTILE PURCHASE AGREEMENT
-
-This Agreement is made between:
-
-BUYER: {buyer_name}
-Address: {buyer_address}
-Contact: {buyer_contact}
-
-SELLER: {seller_name} 
-Address: {seller_address}
-Contact: {seller_contact}
-
-1. PRODUCT SPECIFICATIONS
-   - Fabric Type: {fabric_type}
-   - Quantity: {quantity} {unit}
-   - Quality Specifications: {quality_specs}
-   - Certifications: {certifications}
-
-2. COMMERCIAL TERMS
-   - Unit Price: {unit_price} {currency} per {unit}
-   - Total Value: {total_value} {currency}
-   - Payment Terms: {payment_terms}
-   - Incoterms: {incoterms}
-
-3. DELIVERY TERMS
-   - Destination: {delivery_destination}
-   - Lead Time: {lead_time_days} days
-   - Expected Delivery: {delivery_date}
-
-4. STANDARD TERMS AND CONDITIONS
-   - Quality inspection within 10 days of delivery
-   - Force majeure clause applies
-   - Disputes governed by international arbitration
-   - Warranty period: 90 days from delivery
-
-{special_clauses}
-
-Signatures:
-Buyer: _________________ Date: _________
-Seller: _________________ Date: _________
-        """,
-        "required_fields": ["buyer_name", "seller_name", "fabric_type", "quantity", "unit_price", "delivery_destination"],
-        "standard_clauses": ["quality_inspection", "force_majeure", "arbitration", "warranty"]
-    },
+def extract_negotiation_context(state: AgentState) -> Dict[str, Any]:
+    """
+    Extract comprehensive context from the negotiation process
     
-    "domestic_textile": {
-        "name": "Domestic Textile Supply Agreement",
-        "template": """
-TEXTILE SUPPLY AGREEMENT
-
-Buyer: {buyer_name}, {buyer_address}
-Supplier: {seller_name}, {seller_address}
-
-Product: {fabric_type}
-Quantity: {quantity} {unit}
-Price: {unit_price} {currency} per {unit}
-Total: {total_value} {currency}
-Payment: {payment_terms}
-Delivery: {delivery_date} to {delivery_destination}
-
-Standard terms apply unless modified above.
-
-{special_clauses}
-        """,
-        "required_fields": ["buyer_name", "seller_name", "fabric_type", "quantity", "unit_price"],
-        "standard_clauses": ["standard_warranty", "local_jurisdiction"]
+    This function analyzes the entire negotiation history and extracts
+    the final agreed terms, supplier information, and contract requirements.
+    """
+    
+    # Extract negotiated terms from the negotiation analysis
+    extracted_terms = state.get('extracted_terms') or {}
+    negotiation_analysis = state.get('negotiation_analysis', {})
+    supplier_intent = state.get('supplier_intent', {})
+    
+    # Get original request parameters
+    extracted_params = state.get('extracted_parameters', {})
+    
+    # Get supplier information
+    supplier_data = state.get('top_suppliers', [])
+    active_supplier = supplier_data[0] if supplier_data else {}
+    
+    # Get negotiation history for context
+    negotiation_history = state.get('negotiation_history', [])
+    
+    # Extract final agreed terms
+    final_terms = {}
+    
+    # Fabric specifications (from original + any modifications)
+    if isinstance(extracted_params, dict):
+        fabric_details = extracted_params.get('fabric_details', {})
+        final_terms['fabric_specifications'] = {
+            'fabric_type': fabric_details.get('type') or 'Not specified',
+            'quality_grade': 'Standard',
+            'gsm': 'As per specification',
+            'composition': fabric_details.get('composition') or 'As per specification',
+            'color': fabric_details.get('color') or 'As per buyer requirement',
+            'width': fabric_details.get('width') or 'Standard width',
+            'finish': fabric_details.get('finish') or 'Standard finish',
+        }
+        
+        # Quantity (from original or negotiated)
+        original_quantity = fabric_details.get('quantity') or 1000
+        final_terms['quantity'] = original_quantity
+        
+        # Pricing (from negotiation or quote)
+        generated_quote = state.get('generated_quote', {})
+        if isinstance(generated_quote, dict):
+            original_price = generated_quote.get('unit_price', 10.0)
+        else:
+            original_price = 10.0
+            
+        negotiated_price = extracted_terms.get('new_price', original_price)
+        final_terms['unit_price'] = negotiated_price
+        final_terms['total_value'] = final_terms['quantity'] * final_terms['unit_price']
+        final_terms['currency'] = 'USD'
+        
+        # Delivery terms
+        logistics_details = extracted_params.get('logistics_details', {})
+        final_terms['delivery_terms'] = {
+            'delivery_timeline': '45-60 days',
+            'shipping_method': 'Sea freight',
+            'incoterms': 'FOB',
+            'delivery_location': 'Buyer warehouse',
+            'partial_shipments': 'Allowed with prior notice'
+        }
+        
+        # Payment terms
+        final_terms['payment_terms'] = {
+            'advance_percentage': 30,
+            'payment_method': 'Bank transfer',
+            'balance_terms': 'Against delivery documents',
+            'currency': final_terms['currency'],
+            'late_payment_penalty': '2% per month'
+        }
+        
+        # Quality standards
+        final_terms['quality_standards'] = {
+            'quality_control': 'Pre-shipment inspection required',
+            'testing_standards': 'International textile standards',
+            'defect_tolerance': '2% maximum',
+            'sampling_procedure': 'Random sampling as per AQL standards',
+            'certification': extracted_params.get('certifications', [])
+        }
+    
+    # Contract metadata - Convert dictionaries to strings
+    buyer_company_dict = {
+        'name': 'Buyer Company Name',
+        'address': 'Buyer Company Address',
+        'contact_person': 'Procurement Manager',
+        'email': state.get('recipient_email', 'buyer@company.com'),
+        'phone': '+1-XXX-XXX-XXXX'
     }
-}
-
-def create_data_aggregation_prompt():
-    """Create prompt for validating and structuring contract data"""
     
-    system_prompt = """You are an expert contract data analyst specializing in B2B textile agreements. Your task is to aggregate and validate all necessary information for contract generation from the negotiation state.
+    supplier_company_dict = {
+        'name': active_supplier.get('name', 'Supplier Company'),
+        'address': active_supplier.get('address', 'Supplier Address'),
+        'location': active_supplier.get('location', 'Unknown'),
+        'contact_person': active_supplier.get('contact_person', 'Sales Manager'),
+        'email': active_supplier.get('email', 'supplier@company.com'),
+        'phone': active_supplier.get('phone', '+X-XXX-XXX-XXXX'),
+        'reliability_score': active_supplier.get('reliability_score', 5.0)
+    }
+    
+    contract_metadata = {
+        'buyer_company': json.dumps(buyer_company_dict),  # Convert to JSON string
+        'supplier_company': json.dumps(supplier_company_dict),  # Convert to JSON string
+        'contract_urgency': extracted_params.get('urgency_level', 'medium') if isinstance(extracted_params, dict) else 'medium',
+        'negotiation_rounds': len(negotiation_history),
+        'agreement_confidence': negotiation_analysis.get('confidence_score', 0.8) if isinstance(negotiation_analysis, dict) else 0.8
+    }
+    
+    return {
+        'final_terms': final_terms,
+        'contract_metadata': contract_metadata,
+        'negotiation_context': {
+            'total_rounds': len(negotiation_history),
+            'supplier_intent': supplier_intent.get('intent') if isinstance(supplier_intent, dict) else 'accept',
+            'key_concessions': 'concessions_made',
+            'remaining_issues': negotiation_analysis.get('remaining_concerns', []) if isinstance(negotiation_analysis, dict) else []
+        }
+    }
 
-**DATA VALIDATION REQUIREMENTS:**
 
-1. **Completeness Check**: Ensure all mandatory fields are present
-2. **Consistency Verification**: Cross-check data across negotiation history
-3. **Legal Compliance**: Validate party information and commercial terms
-4. **Risk Assessment**: Identify any unusual or high-risk elements
+def create_contract_terms_prompt():
+    """Create prompt for extracting and structuring contract terms"""
+    
+    system_prompt = """You are an expert legal AI assistant specializing in B2B textile procurement contracts. Your task is to analyze negotiated terms and structure them into a comprehensive contract terms format.
 
-**PARTY INFORMATION EXTRACTION:**
-- Extract complete legal entity details for both buyer and seller
-- Validate contact information and legal addresses
-- Ensure authorized signatories are identified
+**EXPERTISE AREAS:**
+- International textile trade contracts
+- B2B procurement legal frameworks
+- Supply chain contract structuring
+- Risk assessment and mitigation clauses
+- Compliance with international trade laws
 
-**COMMERCIAL TERMS VALIDATION:**
-- Verify final agreed prices and payment terms
-- Confirm currency and calculation accuracy
-- Validate Incoterms and shipping responsibilities
+**CONTRACT STRUCTURING PRINCIPLES:**
 
-**PRODUCT SPECIFICATIONS:**
-- Aggregate complete technical specifications
-- Confirm certifications and quality requirements
-- Validate quantities and units of measurement
+1. **Completeness**: Ensure all negotiated terms are captured accurately
+2. **Legal Soundness**: Include necessary protective clauses for both parties
+3. **Risk Mitigation**: Identify and address potential risks through appropriate clauses
+4. **Industry Standards**: Apply textile industry best practices and standards
+5. **Enforceability**: Structure terms for legal enforceability across jurisdictions
 
-**ANOMALY DETECTION:**
-- Flag any non-standard terms negotiated
-- Identify deviations from typical market practices
-- Highlight terms that may require special attention
+**KEY COMPONENTS TO STRUCTURE:**
 
-Be thorough and precise. Contract accuracy is critical for legal and business success."""
+**Fabric Specifications:**
+- Technical specifications with measurable parameters
+- Quality standards and testing requirements
+- Acceptable variance ranges
+- Certification requirements
+
+**Commercial Terms:**
+- Precise pricing structure with currency
+- Quantity specifications with tolerance levels
+- Total contract value calculations
+- Price escalation/de-escalation clauses if applicable
+
+**Delivery & Logistics:**
+- Clear delivery timelines with milestone dates
+- Shipping terms and responsibilities (Incoterms)
+- Partial shipment conditions
+- Delivery acceptance criteria
+
+**Payment Structure:**
+- Payment schedule with specific percentages
+- Payment methods and currency
+- Late payment penalties
+- Security arrangements (if any)
+
+**Quality & Compliance:**
+- Quality control procedures
+- Inspection and testing protocols
+- Defect handling procedures
+- Compliance certifications required
+
+**Risk Management:**
+- Force majeure provisions
+- Penalty clauses for delays or quality issues
+- Insurance requirements
+- Dispute resolution mechanisms
+
+Analyze the negotiation context and structure comprehensive contract terms that protect both parties while reflecting the agreed-upon conditions."""
 
     return ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", """Aggregate and validate contract data from this negotiation:
+        ("human", """Structure the following negotiated terms into comprehensive contract terms:
 
-**NEGOTIATION HISTORY:**
-{negotiation_history}
-
-**FINAL TERMS:**
+**NEGOTIATED FINAL TERMS:**
 {final_terms}
 
-**SUPPLIER DETAILS:**
+**SUPPLIER INFORMATION:**
 {supplier_info}
 
-**ORIGINAL REQUEST:**
-{original_request}
+**NEGOTIATION CONTEXT:**
+- Negotiation rounds: {negotiation_rounds}
+- Supplier intent: {supplier_intent}
+- Key concessions made: {key_concessions}
+- Agreement confidence: {agreement_confidence}
 
-**USER PROFILE:**
-{user_profile}
+**CONTRACT REQUIREMENTS:**
+- Urgency level: {urgency_level}
+- Industry: Textile procurement
+- Contract type: Supply agreement
 
-Validate completeness and flag any issues or missing information.""")
+Please structure these terms into a comprehensive ContractTerms format with all necessary details, protective clauses, and industry-standard provisions.""")
     ])
 
-def create_contract_generation_prompt():
-    """Create prompt for intelligent contract text generation"""
+
+def create_contract_drafting_prompt():
+    """Create prompt for drafting the complete contract document"""
     
-    system_prompt = """You are an expert contract drafting specialist with deep knowledge of international textile trade law and B2B agreements. Your expertise spans contract structure, risk mitigation, and legal compliance across multiple jurisdictions.
+    system_prompt = """You are a senior legal counsel and contract drafting specialist with extensive experience in international B2B textile procurement agreements. Your expertise covers:
+
+- International commercial law and trade regulations
+- Textile industry contract standards and best practices
+- Cross-border procurement legal frameworks
+- Risk management and dispute resolution
+- Contract enforcement across multiple jurisdictions
 
 **CONTRACT DRAFTING PRINCIPLES:**
 
-1. **Clarity and Precision**: Every term must be unambiguous and enforceable
-2. **Risk Mitigation**: Include appropriate protections for both parties
-3. **Industry Standards**: Follow established textile industry practices
-4. **Legal Compliance**: Ensure terms comply with applicable trade laws
-5. **Practical Enforceability**: Terms must be realistic and implementable
+1. **Professional Structure**: Follow standard commercial contract format
+2. **Legal Precision**: Use precise legal language while maintaining clarity
+3. **Balanced Protection**: Protect both buyer and supplier interests fairly
+4. **Industry Compliance**: Incorporate textile industry standards and regulations
+5. **Practical Enforceability**: Ensure terms are practically enforceable
 
-**STRUCTURE REQUIREMENTS:**
-- Professional legal formatting
-- Clear section headers and numbering  
-- Logical flow from specifications to commercial terms
-- Appropriate legal language without excessive complexity
+**STANDARD CONTRACT STRUCTURE:**
 
-**SPECIAL ATTENTION AREAS:**
-- Quality specifications and inspection procedures
-- Payment terms and security arrangements
-- Delivery obligations and risk transfer
-- Warranty and liability limitations
+**1. PREAMBLE**
+- Party identification with complete legal details
+- Contract purpose and background
+- Recitals establishing context
+
+**2. DEFINITIONS**
+- Key terms and their precise meanings
+- Technical specifications definitions
+- Commercial terms definitions
+
+**3. SCOPE OF SUPPLY**
+- Detailed product specifications
+- Quantity and measurement units
+- Quality standards and requirements
+
+**4. COMMERCIAL TERMS**
+- Pricing and payment structure
+- Currency and exchange rate provisions
+- Invoicing and payment procedures
+
+**5. DELIVERY & LOGISTICS**
+- Delivery timelines and milestones
+- Shipping terms and responsibilities
+- Risk transfer points
+
+**6. QUALITY ASSURANCE**
+- Quality control procedures
+- Testing and inspection protocols
+- Acceptance and rejection criteria
+
+**7. LEGAL & COMPLIANCE**
+- Governing law and jurisdiction
 - Dispute resolution mechanisms
+- Regulatory compliance requirements
 
-**TEMPLATE ADAPTATION:**
-- Use appropriate template for transaction type (international vs domestic)
-- Customize standard clauses for specific deal requirements
-- Add negotiated special terms while maintaining contract integrity
-- Ensure consistency between template sections
+**8. RISK MANAGEMENT**
+- Force majeure provisions
+- Limitation of liability clauses
+- Insurance and indemnification
 
-**ANOMALY HANDLING:**
-- Clearly identify and highlight non-standard terms
-- Provide explanatory notes for unusual clauses
-- Flag high-risk provisions for human review
-- Maintain clear distinction between standard and custom terms
+**9. GENERAL PROVISIONS**
+- Contract modification procedures
+- Termination conditions
+- Confidentiality obligations
 
-Generate professional, enforceable contract text that accurately reflects all negotiated terms while protecting both parties' interests."""
+**10. EXECUTION**
+- Signature blocks for authorized representatives
+- Date and place of execution
+- Witness requirements (if applicable)
 
-    return ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", """Generate contract text using this validated data:
+**DRAFTING GUIDELINES:**
+- Use clear, unambiguous language
+- Avoid legal jargon where possible
+- Include specific dates, amounts, and measurable criteria
+- Ensure mutual obligations are balanced
+- Incorporate appropriate industry standards
+- Include practical dispute resolution mechanisms
 
-**TEMPLATE TO USE:** {template_name}
-
-**BUYER INFORMATION:**
-{buyer_info}
-
-**SELLER INFORMATION:**
-{seller_info}
-
-**PRODUCT SPECIFICATIONS:**
-{product_specs}
-
-**COMMERCIAL TERMS:**
-{commercial_terms}
-
-**DELIVERY TERMS:**
-{delivery_terms}
-
-**SPECIAL NEGOTIATIONS:**
-{special_terms}
-
-**TEMPLATE STRUCTURE:**
-{template_structure}
-
-Create complete contract text with proper legal formatting and highlight any non-standard terms.""")
-    ])
-
-def create_anomaly_detection_prompt():
-    """Create prompt for contract anomaly detection and risk assessment"""
-    
-    system_prompt = """You are a senior legal risk analyst specializing in B2B textile contracts. Your expertise includes identifying unusual terms, assessing legal risks, and flagging items that require human legal review.
-
-**ANOMALY DETECTION CRITERIA:**
-
-1. **Pricing Anomalies:**
-   - Prices significantly above/below market rates
-   - Unusual payment terms or currency arrangements
-   - Complex pricing structures or adjustments
-
-2. **Legal Term Deviations:**
-   - Non-standard warranty periods
-   - Unusual liability limitations or expansions
-   - Custom dispute resolution procedures
-   - Modified force majeure clauses
-
-3. **Commercial Risk Factors:**
-   - Extended payment terms (>60 days)
-   - High penalty clauses or liquidated damages
-   - Unusual inspection or acceptance procedures
-   - Special packaging or handling requirements
-
-4. **Delivery and Logistics Issues:**
-   - Unrealistic delivery timelines
-   - Complex shipping arrangements
-   - Special destination or routing requirements
-   - Custom insurance or risk arrangements
-
-**RISK ASSESSMENT LEVELS:**
-- **Low Risk**: Minor deviations from standard terms
-- **Medium Risk**: Significant but manageable variations
-- **High Risk**: Terms that could impact enforceability or create significant exposure
-- **Critical Risk**: Terms that require immediate legal review
-
-**FLAGGING PRINCIPLES:**
-- Be conservative - better to over-flag than miss risks
-- Provide specific explanations for each anomaly
-- Suggest review priorities based on risk levels
-- Offer alternative standard language where appropriate
-
-Focus on protecting business interests while enabling deal completion."""
+Generate a complete, professional contract document that reflects the negotiated terms while providing comprehensive legal protection for both parties."""
 
     return ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", """Analyze this contract for anomalies and risks:
+        ("human", """Draft a complete B2B textile procurement contract based on these structured terms:
 
-**CONTRACT TEXT:**
-{contract_text}
+**CONTRACT TERMS:**
+{contract_terms}
 
-**TEMPLATE BASELINE:**
-{standard_template}
+**CONTRACT METADATA:**
+- Contract ID: {contract_id}
+- Buyer: {buyer_company}
+- Supplier: {supplier_company}
+- Contract Type: {contract_type}
+- Governing Law: {governing_law}
+- Creation Date: {creation_date}
 
-**NEGOTIATION CONTEXT:**
-{negotiation_context}
+**CONTEXT:**
+- Negotiation History: {negotiation_rounds} rounds completed
+- Agreement Confidence: {agreement_confidence}
+- Urgency Level: {urgency_level}
 
-**INDUSTRY BENCHMARKS:**
-{market_standards}
+**REQUIREMENTS:**
+- Professional legal document format
+- Comprehensive protective clauses
+- Industry-standard terms and conditions
+- Clear obligations for both parties
+- Practical enforcement mechanisms
 
-Identify all non-standard terms, assess risks, and provide specific review recommendations.""")
+Please generate:
+1. Complete contract title
+2. Professional preamble with party details
+3. Comprehensive terms and conditions
+4. Appropriate schedules/annexures (if needed)
+5. Formal signature block
+
+The contract should be ready for legal review and execution.""")
     ])
+
 
 # Initialize models and prompts
 model = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
-data_model = model.with_structured_output(dict)  # For flexible data validation
-contract_model = model.with_structured_output(ContractDraft)
-anomaly_model = model.with_structured_output(ContractAnomalies)
+terms_model = model.with_structured_output(ContractTerms)
+contract_model = model.with_structured_output(DraftedContract)
 
-data_prompt = create_data_aggregation_prompt()
-contract_prompt = create_contract_generation_prompt()
-anomaly_prompt = create_anomaly_detection_prompt()
+terms_prompt = create_contract_terms_prompt()
+contract_prompt = create_contract_drafting_prompt()
 
-def aggregate_contract_data(state: AgentState) -> Dict[str, Any]:
-    """
-    Step 1: Aggregate and validate all contract data from negotiation state
-    
-    Args:
-        state: Current agent state with negotiation results
-    
-    Returns:
-        dict: Validated and structured contract data
-    """
-    
-    # Extract negotiation results
-    negotiation_history = state.get('negotiation_history', [])
-    final_terms = {}
-    
-    # Get final terms from successful negotiation
-    if negotiation_history:
-        final_round = negotiation_history[-1]
-        final_terms = final_round.get('terms', {})
-    
-    # Extract original parameters
-    extracted_params = state.get('extracted_parameters', {})
-    fabric_details = extracted_params.get('fabric_details', {})
-    price_constraints = extracted_params.get('price_constraints', {})
-    logistics_details = extracted_params.get('logistics_details', {})
-    
-    # Get supplier information
-    top_suppliers = state.get('top_suppliers', [])
-    supplier_info = top_suppliers[0] if top_suppliers else {}
-    
-    # User profile (in practice, would come from user management system)
-    user_profile = state.get('user_profile', {
-        'legal_name': 'ABC Trading Company Ltd.',
-        'address': '123 Business Street, Commerce City, TX 12345, USA',
-        'contact_person': 'John Smith, Procurement Manager',
-        'email': 'john.smith@abctrading.com'
-    })
-    
-    return {
-        'negotiation_history': negotiation_history,
-        'final_terms': final_terms,
-        'supplier_info': supplier_info,
-        'original_request': {
-            'fabric_details': fabric_details,
-            'price_constraints': price_constraints,
-            'logistics_details': logistics_details
-        },
-        'user_profile': user_profile
-    }
 
-def select_contract_template(contract_data: Dict[str, Any]) -> str:
+def initiate_contract(state: AgentState):
     """
-    Step 2: Select appropriate contract template based on deal characteristics
-    
-    Args:
-        contract_data: Aggregated contract data
-    
-    Returns:
-        str: Template identifier to use
-    """
-    
-    supplier_info = contract_data.get('supplier_info', {})
-    supplier_country = supplier_info.get('country', '').lower()
-    
-    # Determine if international or domestic
-    domestic_countries = ['usa', 'united states', 'us']  # Configurable based on buyer location
-    
-    if supplier_country in domestic_countries:
-        return "domestic_textile"
-    else:
-        return "international_textile"
-
-def generate_contract_draft(contract_data: Dict[str, Any], template_name: str) -> ContractDraft:
-    """
-    Step 3: Generate complete contract draft with intelligent variable injection
-    
-    Args:
-        contract_data: Validated contract data
-        template_name: Selected template identifier
-    
-    Returns:
-        ContractDraft: Complete contract draft with metadata
-    """
-    
-    template_info = CONTRACT_TEMPLATES[template_name]
-    
-    # Extract and structure data for contract generation
-    supplier_info = contract_data['supplier_info']
-    user_profile = contract_data['user_profile']
-    fabric_details = contract_data['original_request']['fabric_details']
-    final_terms = contract_data['final_terms']
-    logistics_details = contract_data['original_request']['logistics_details']
-    
-    # Calculate delivery date
-    lead_time_days = final_terms.get('new_lead_time', logistics_details.get('timeline_days', 30))
-    delivery_date = (datetime.now() + timedelta(days=lead_time_days)).strftime('%Y-%m-%d')
-    
-    # Prepare contract data structure
-    buyer = PartyDetails(
-        legal_name=user_profile.get('legal_name', 'Buyer Company'),
-        address=user_profile.get('address', 'Buyer Address'),
-        contact_person=user_profile.get('contact_person', 'Buyer Contact'),
-        email=user_profile.get('email', 'buyer@company.com')
-    )
-    
-    seller = PartyDetails(
-        legal_name=supplier_info.get('company_name', 'Supplier Company'),
-        address=f"{supplier_info.get('city', '')}, {supplier_info.get('country', '')}",
-        contact_person=supplier_info.get('contact_person', 'Supplier Contact'),
-        email=supplier_info.get('contact_info', {}).get('email', 'supplier@company.com')
-    )
-    
-    product_specs = ProductSpecifications(
-        fabric_type=fabric_details.get('type', 'Textile Product'),
-        quantity=fabric_details.get('quantity', 0),
-        unit=fabric_details.get('unit', 'meters'),
-        quality_specifications=fabric_details.get('quality_specs', []),
-        certifications=fabric_details.get('certifications', [])
-    )
-    
-    unit_price = final_terms.get('new_price', contract_data['original_request']['price_constraints'].get('max_price', 0))
-    total_value = unit_price * product_specs.quantity
-    
-    commercial_terms = CommercialTerms(
-        unit_price=unit_price,
-        total_value=total_value,
-        currency='USD',
-        payment_terms=final_terms.get('new_payment_terms', 'Net 30'),
-        incoterms=final_terms.get('new_incoterms', 'FOB')
-    )
-    
-    delivery_terms = DeliveryTerms(
-        delivery_destination=logistics_details.get('destination', 'Buyer Location'),
-        lead_time_days=lead_time_days,
-        delivery_date=delivery_date
-    )
-    
-    # Generate contract text by filling template
-    special_clauses = ""
-    if final_terms.get('additional_conditions'):
-        special_clauses = "\nSPECIAL CONDITIONS:\n" + "\n".join([f"- {condition}" for condition in final_terms['additional_conditions']])
-    
-    contract_text = template_info['template'].format(
-        buyer_name=buyer.legal_name,
-        buyer_address=buyer.address,
-        buyer_contact=buyer.contact_person,
-        seller_name=seller.legal_name,
-        seller_address=seller.address,
-        seller_contact=seller.contact_person,
-        fabric_type=product_specs.fabric_type,
-        quantity=product_specs.quantity,
-        unit=product_specs.unit,
-        quality_specs=', '.join(product_specs.quality_specifications),
-        certifications=', '.join(product_specs.certifications),
-        unit_price=commercial_terms.unit_price,
-        currency=commercial_terms.currency,
-        total_value=commercial_terms.total_value,
-        payment_terms=commercial_terms.payment_terms,
-        incoterms=commercial_terms.incoterms,
-        delivery_destination=delivery_terms.delivery_destination,
-        lead_time_days=delivery_terms.lead_time_days,
-        delivery_date=delivery_terms.delivery_date,
-        special_clauses=special_clauses
-    )
-    
-    # Create contract draft
-    contract_draft = ContractDraft(
-        contract_id=f"CTR_{str(uuid.uuid4())[:8]}",
-        contract_title=f"Textile Purchase Agreement - {product_specs.fabric_type}",
-        buyer=buyer,
-        seller=seller,
-        product_specs=product_specs,
-        commercial_terms=commercial_terms,
-        delivery_terms=delivery_terms,
-        contract_text=contract_text,
-        anomalies=ContractAnomalies(anomaly_score=0.0),  # Will be populated by anomaly detection
-        template_used=template_name,
-        creation_date=datetime.now().isoformat(),
-        review_priority="medium"
-    )
-    
-    return contract_draft
-
-def detect_contract_anomalies(contract_draft: ContractDraft, negotiation_context: Dict[str, Any]) -> ContractAnomalies:
-    """
-    Step 4: Detect and flag non-standard terms requiring human review
-    
-    Args:
-        contract_draft: Generated contract draft
-        negotiation_context: Context from negotiation process
-    
-    Returns:
-        ContractAnomalies: Detailed anomaly analysis
-    """
-    
-    anomalies = []
-    risk_factors = []
-    review_notes = []
-    special_conditions = []
-    
-    # Check for pricing anomalies
-    if contract_draft.commercial_terms.unit_price > 10:  # Example threshold
-        anomalies.append("Unit price above typical market range")
-        review_notes.append("Verify pricing justification")
-    
-    # Check payment terms
-    if "advance" in contract_draft.commercial_terms.payment_terms.lower():
-        special_conditions.append("Advance payment required")
-        review_notes.append("Advance payment terms need approval")
-    
-    # Check for extended lead times
-    if contract_draft.delivery_terms.lead_time_days > 60:
-        risk_factors.append("Extended lead time may impact project timelines")
-        review_notes.append("Confirm lead time acceptability")
-    
-    # Check for special conditions from negotiation
-    negotiation_history = negotiation_context.get('negotiation_history', [])
-    for round_data in negotiation_history:
-        terms = round_data.get('terms', {})
-        if terms.get('additional_conditions'):
-            special_conditions.extend(terms['additional_conditions'])
-    
-    # Calculate anomaly score
-    total_checks = 10  # Total number of checks performed
-    anomaly_count = len(anomalies) + len(risk_factors) + len(special_conditions)
-    anomaly_score = min(1.0, anomaly_count / total_checks)
-    
-    return ContractAnomalies(
-        non_standard_clauses=anomalies,
-        special_conditions=special_conditions,
-        risk_factors=risk_factors,
-        review_notes=review_notes,
-        anomaly_score=anomaly_score
-    )
-
-def determine_review_priority(anomalies: ContractAnomalies, contract_value: float) -> Literal["low", "medium", "high", "urgent"]:
-    """
-    Determine human review priority based on anomalies and contract value
-    
-    Args:
-        anomalies: Detected contract anomalies
-        contract_value: Total contract value
-    
-    Returns:
-        str: Review priority level
-    """
-    
-    # High value contracts get elevated priority
-    if contract_value > 100000:
-        base_priority = "high"
-    elif contract_value > 50000:
-        base_priority = "medium"
-    else:
-        base_priority = "low"
-    
-    # Elevate based on anomaly score
-    if anomalies.anomaly_score > 0.7:
-        return "urgent"
-    elif anomalies.anomaly_score > 0.4:
-        return "high" if base_priority != "urgent" else "urgent"
-    elif anomalies.anomaly_score > 0.2:
-        return "medium" if base_priority == "low" else base_priority
-    else:
-        return base_priority
-
-def initiate_contract(state: AgentState) -> dict:
-    """
-    Node 7: initiate_contract - Legal and procedural formalization engine
+    Node: initiate_contract - Contract Drafting Agent
     
     Purpose:
-    - Transform negotiated terms into structured legal document
-    - Validate all contract data for completeness and accuracy
-    - Generate professional contract draft using appropriate templates
-    - Detect and flag non-standard terms requiring human review
-    - Prepare contract for final human oversight and approval
+    - Analyze complete negotiation history and final agreed terms
+    - Extract structured contract terms from negotiation outcomes
+    - Generate comprehensive preliminary contract document
+    - Prepare contract for legal review and execution
+    - Ensure compliance with industry standards and legal requirements
+    
+    Process Flow:
+    1. Extract negotiation context and final agreed terms
+    2. Structure terms into comprehensive contract format
+    3. Generate professional contract document
+    4. Perform quality validation and compliance checks
+    5. Prepare for legal review and next steps
     
     Args:
-        state: Current agent state with successful negotiation results
+        state: Current agent state with negotiation history and outcomes
     
     Returns:
-        dict: State updates with contract draft and review requirements
+        dict: State updates with drafted contract and metadata
     """
     
     try:
-        # Step 1: Data Aggregation and Validation
-        contract_data = aggregate_contract_data(state)
+        print("📄 Initiating contract drafting process...")
         
-        # Validate that we have sufficient data for contract generation
-        if not contract_data['supplier_info']:
-            return {
-                "error": "Missing supplier information for contract generation",
-                "messages": [{"role": "assistant", "content": "Error: Cannot generate contract without supplier details"}],
-                "status": "contract_error"
-            }
+        # Step 1: Extract comprehensive negotiation context
+        negotiation_context = extract_negotiation_context(state)
+        final_terms = negotiation_context['final_terms']
+        metadata = negotiation_context['contract_metadata']
         
-        # Step 2: Template Selection
-        template_name = select_contract_template(contract_data)
+        # Generate unique contract ID
+        contract_id = f"CTXT_{datetime.now().strftime('%Y%m%d')}_{str(uuid.uuid4())[:8].upper()}"
         
-        # Step 3: Contract Generation
-        contract_draft = generate_contract_draft(contract_data, template_name)
+        print(f"📋 Generated Contract ID: {contract_id}")
+        print(f"💼 Supplier: {json.loads(metadata['supplier_company'])['name']}")
+        print(f"📦 Quantity: {final_terms['quantity'] or 'N/A'} meters")
+        print(f"💰 Total Value: {final_terms['currency'] or 'USD'} {final_terms['total_value'] or 'N/A'}")
+
+            
+        # Step 2: Structure negotiated terms using AI
+        print("🔍 Structuring contract terms...")
+        terms_formatted_prompt = terms_prompt.invoke({
+            "final_terms": str(final_terms),
+            "supplier_info": metadata['supplier_company'],
+            "negotiation_rounds": metadata['negotiation_rounds'],
+            "supplier_intent": negotiation_context['negotiation_context']['supplier_intent'],
+            "key_concessions": str(negotiation_context['negotiation_context']['key_concessions']),
+            "agreement_confidence": metadata['agreement_confidence'],
+            "urgency_level": metadata['contract_urgency']
+        })
         
-        # Step 4: Anomaly Detection
-        anomalies = detect_contract_anomalies(contract_draft, contract_data)
+        # Get structured contract terms from AI
+        structured_terms: ContractTerms = terms_model.invoke(terms_formatted_prompt)
         
-        # Update contract draft with anomalies
-        contract_draft.anomalies = anomalies
-        contract_draft.review_priority = determine_review_priority(
-            anomalies, 
-            contract_draft.commercial_terms.total_value
+        # Step 3: Create contract metadata with proper string conversion
+        contract_metadata = ContractMetadata(
+            contract_id=contract_id,
+            contract_type="textile_procurement_agreement",
+            contract_version="1.0",
+            buyer_company=metadata['buyer_company'],  # Already a JSON string
+            supplier_company=metadata['supplier_company'],  # Already a JSON string
+            creation_date=datetime.now().isoformat(),  # Convert datetime to ISO string
+            effective_date=None,
+            expiry_date=None,
+            governing_law="International Commercial Law",
+            jurisdiction=None
         )
         
-        # Step 5: Generate human-readable summary
-        assistant_message = generate_contract_summary(contract_draft, anomalies)
+        # Step 4: Generate complete contract document using AI
+        print("📝 Drafting complete contract document...")
+        contract_formatted_prompt = contract_prompt.invoke({
+            "contract_terms": structured_terms.model_dump(),
+            "contract_id": contract_id,
+            "buyer_company": json.loads(metadata['buyer_company'])['name'],
+            "supplier_company": json.loads(metadata['supplier_company'])['name'],
+            "contract_type": "Textile Procurement Agreement",
+            "governing_law": "International Commercial Law",
+            "creation_date": datetime.now().strftime("%B %d, %Y"),
+            "negotiation_rounds": metadata['negotiation_rounds'],
+            "agreement_confidence": f"{metadata['agreement_confidence']:.2f}",
+            "urgency_level": metadata['contract_urgency']
+        })
         
-        # Step 6: Prepare state updates
+        # Get complete drafted contract from AI
+        drafted_contract: DraftedContract = contract_model.invoke(contract_formatted_prompt)
+        
+        # Step 5: Enhance contract with metadata and validation
+        drafted_contract.contract_id = contract_id
+        drafted_contract.contract_terms_summary = str(structured_terms.model_dump())
+        drafted_contract.contract_metadata_summary = str(contract_metadata.model_dump())
+        drafted_contract.generation_timestamp = datetime.now().isoformat()
+        
+        # Step 6: Perform quality validation
+        validation_results = validate_contract_quality(drafted_contract, negotiation_context)
+        
+        # Step 7: Generate recommendations and next steps
+        recommended_actions = generate_contract_recommendations(
+            drafted_contract, 
+            negotiation_context, 
+            validation_results
+        )
+        
+        drafted_contract.recommended_actions = recommended_actions
+        
+        # Step 8: Create assistant response message
+        supplier_name = json.loads(metadata['supplier_company'])['name']
+        contract_value = final_terms['total_value'] or 'TBD'
+        currency = final_terms['currency'] or 'USD'
+        
+        assistant_message = f"""📋 **Contract Successfully Drafted**
+
+**Contract Details:**
+• **Contract ID:** {contract_id}
+• **Parties:** Your Company ↔ {supplier_name}
+• **Contract Value:** {currency} {contract_value:,.2f}
+• **Contract Type:** Textile Procurement Agreement
+• **Status:** Draft - Ready for Review
+
+**Contract Summary:**
+• **Product:** {final_terms['fabric_specifications']['fabric_type'] or 'Textile products'}
+• **Quantity:** {final_terms['quantity'] or 'TBD':,} meters
+• **Unit Price:** {currency} {final_terms['unit_price'] or 'TBD'}/meter
+• **Delivery:** {final_terms['delivery_terms']['delivery_timeline'] or 'As agreed'}
+
+**Quality Assessment:**
+• **Completeness:** {validation_results['completeness_score']:.1%}
+• **Legal Soundness:** {validation_results['legal_soundness']:.1%}
+• **Risk Coverage:** {validation_results['risk_coverage']:.1%}
+• **Overall Confidence:** {drafted_contract.confidence_score:.1%}
+
+**Next Steps:**
+{chr(10).join(f'• {action}' for action in recommended_actions[:3])}
+
+**⚖️ Legal Review Required:** This contract requires legal review before execution."""
+        
+        # Step 9: Prepare state updates
         state_updates = {
-            "contract_draft": contract_draft.model_dump(),
-            "contract_id": contract_draft.contract_id,
-            "contract_status": "draft",
-            "review_priority": contract_draft.review_priority,
-            "anomalies_detected": len(anomalies.non_standard_clauses) + len(anomalies.special_conditions),
-            "next_step": "send_for_human_review",
-            "messages": [{"role": "assistant", "content": assistant_message}],
-            "status": "contract_drafted",
-            "contract_creation_timestamp": datetime.now().isoformat()
+            "drafted_contract": drafted_contract.model_dump(),
+            "contract_terms": structured_terms.model_dump(),
+            "contract_metadata": contract_metadata.model_dump(),
+            "contract_id": contract_id,
+            "contract_ready": True,
+            "contract_confidence": drafted_contract.confidence_score,
+            "requires_legal_review": drafted_contract.legal_review_required,
+            "contract_generation_timestamp": datetime.now(),
+            "next_step": "legal_review_required",
+            "messages1": [assistant_message],
+            "status": "contract_drafted"
         }
         
-        # Add flags for urgent review if needed
-        if contract_draft.review_priority in ["high", "urgent"]:
-            state_updates["requires_urgent_review"] = True
-            state_updates["urgent_review_reasons"] = anomalies.risk_factors
+        print(f"✅ Contract drafting completed successfully!")
+        print(f"📊 Contract confidence: {drafted_contract.confidence_score:.1%}")
+        print(f"📋 Next step: {state_updates['next_step']}")
         
         return state_updates
-        
+            
     except Exception as e:
-        error_message = f"Error generating contract: {str(e)}"
+        error_message = f"❌ Error in contract drafting: {str(e)}"
+        print(error_message)
         return {
             "error": str(e),
-            "messages": [{"role": "assistant", "content": error_message}],
+            "messages1": [error_message],
             "next_step": "handle_error",
-            "status": "contract_generation_error"
+            "status": "contract_drafting_error"
         }
 
-def generate_contract_summary(contract_draft: ContractDraft, anomalies: ContractAnomalies) -> str:
-    """
-    Generate human-readable summary of the contract draft
+
+def validate_contract_quality(drafted_contract: DraftedContract, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the quality and completeness of the drafted contract"""
     
-    Args:
-        contract_draft: Generated contract draft
-        anomalies: Detected anomalies
+    validation_results = {
+        "completeness_score": 0.0,
+        "legal_soundness": 0.0,
+        "risk_coverage": 0.0,
+        "issues": [],
+        "recommendations": []
+    }
     
-    Returns:
-        str: Formatted summary for user
-    """
-    
-    summary_parts = [
-        f"📄 **Contract Draft Generated**\n",
-        f"**Contract ID**: {contract_draft.contract_id}",
-        f"**Template Used**: {CONTRACT_TEMPLATES[contract_draft.template_used]['name']}\n",
-        
-        f"**📋 Contract Details**:",
-        f"• **Buyer**: {contract_draft.buyer.legal_name}",
-        f"• **Seller**: {contract_draft.seller.legal_name}",
-        f"• **Product**: {contract_draft.product_specs.fabric_type}",
-        f"• **Quantity**: {contract_draft.product_specs.quantity} {contract_draft.product_specs.unit}",
-        f"• **Total Value**: {contract_draft.commercial_terms.total_value:,.2f} {contract_draft.commercial_terms.currency}",
-        f"• **Delivery**: {contract_draft.delivery_terms.lead_time_days} days to {contract_draft.delivery_terms.delivery_destination}\n"
+    # Check completeness
+    completeness_checks = [
+        len(drafted_contract.preamble) > 100,
+        len(drafted_contract.terms_and_conditions) > 500,
+        drafted_contract.contract_terms_summary and len(drafted_contract.contract_terms_summary) > 100,
+        len(drafted_contract.signature_block) > 50
     ]
     
-    # Add anomaly information
-    if anomalies.anomaly_score > 0.1:
-        summary_parts.extend([
-            f"⚠️ **Review Required** (Priority: {contract_draft.review_priority.upper()})",
-            f"**Anomaly Score**: {anomalies.anomaly_score:.2f}/1.0\n"
-        ])
-        
-        if anomalies.non_standard_clauses:
-            summary_parts.append("**Non-Standard Terms**:")
-            for clause in anomalies.non_standard_clauses:
-                summary_parts.append(f"• {clause}")
-            summary_parts.append("")
-        
-        if anomalies.special_conditions:
-            summary_parts.append("**Special Conditions**:")
-            for condition in anomalies.special_conditions:
-                summary_parts.append(f"• {condition}")
-            summary_parts.append("")
-        
-        if anomalies.review_notes:
-            summary_parts.append("**Review Notes**:")
-            for note in anomalies.review_notes:
-                summary_parts.append(f"• {note}")
+    validation_results["completeness_score"] = sum(completeness_checks) / len(completeness_checks)
+    
+    # Check legal soundness
+    legal_checks = [
+        "governing law" in drafted_contract.terms_and_conditions.lower(),
+        "dispute resolution" in drafted_contract.terms_and_conditions.lower(),
+        "force majeure" in drafted_contract.terms_and_conditions.lower(),
+        drafted_contract.legal_review_required
+    ]
+    
+    validation_results["legal_soundness"] = sum(legal_checks) / len(legal_checks)
+    
+    # Check risk coverage
+    risk_checks = [
+        "insurance" in drafted_contract.terms_and_conditions.lower() or "liability" in drafted_contract.terms_and_conditions.lower(),
+        "termination" in drafted_contract.terms_and_conditions.lower(),
+        "quality" in drafted_contract.terms_and_conditions.lower()
+    ]
+    
+    validation_results["risk_coverage"] = sum(risk_checks) / len(risk_checks)
+    
+    # Identify issues
+    if validation_results["completeness_score"] < 0.8:
+        validation_results["issues"].append("Contract may be missing key sections")
+    
+    if validation_results["legal_soundness"] < 0.7:
+        validation_results["issues"].append("Contract may need additional legal provisions")
+    
+    if validation_results["risk_coverage"] < 0.6:
+        validation_results["issues"].append("Risk mitigation clauses may be insufficient")
+    
+    return validation_results
+
+
+def generate_contract_recommendations(drafted_contract: DraftedContract, context: Dict[str, Any], validation: Dict[str, Any]) -> List[str]:
+    """Generate recommendations for contract execution and next steps"""
+    
+    recommendations = []
+    
+    # Always recommend legal review for contracts
+    recommendations.append("Conduct comprehensive legal review with qualified counsel")
+    
+    # Compliance recommendations
+    recommendations.append("Verify compliance with applicable trade regulations and standards")
+    
+    # Quality-based recommendations
+    if validation["completeness_score"] < 0.9:
+        recommendations.append("Review contract for completeness and add any missing standard clauses")
+    
+    if validation["risk_coverage"] < 0.8:
+        recommendations.append("Strengthen risk mitigation and penalty clauses")
+    
+    # Context-based recommendations
+    urgency = context['contract_metadata']['contract_urgency']
+    if urgency == "urgent":
+        recommendations.append("Expedite legal review due to urgent timeline requirements")
+    
+    agreement_confidence = context['contract_metadata']['agreement_confidence']
+    if agreement_confidence < 0.8:
+        recommendations.append("Consider additional negotiation rounds to improve terms clarity")
+    
+    # Standard recommendations
+    recommendations.extend([
+        "Obtain internal approvals from authorized signatories",
+        "Schedule contract execution meeting with supplier",
+        "Prepare contract management and monitoring procedures",
+        "Set up delivery and payment milestone tracking"
+    ])
+    
+    return recommendations[:8]  # Return top 8 recommendations
+
+
+def determine_contract_complexity(final_terms: Dict[str, Any]) -> str:
+    """Determine contract complexity level"""
+    
+    complexity_factors = 0
+    
+    # Value-based complexity
+    total_value = final_terms.get('total_value', 0)
+    if total_value > 1000000:  # > $1M
+        complexity_factors += 2
+    elif total_value > 100000:  # > $100K
+        complexity_factors += 1
+    
+    # Terms complexity
+    if len(final_terms.get('quality_standards', {})) > 3:
+        complexity_factors += 1
+    
+    # Payment complexity
+    payment_terms = final_terms.get('payment_terms', {})
+    if payment_terms.get('advance_percentage', 30) != 30:  # Non-standard advance
+        complexity_factors += 1
+    
+    if complexity_factors >= 4:
+        return "high"
+    elif complexity_factors >= 2:
+        return "medium"
     else:
-        summary_parts.append("✅ **Standard Contract** - Minimal review required")
-    
-    summary_parts.append(f"\n**Status**: Ready for human review and approval")
-    
-    return "\n".join(summary_parts)
-
-def validate_contract_completeness(contract_draft: ContractDraft) -> tuple[bool, List[str]]:
-    """
-    Validate that contract draft contains all required elements
-    
-    Args:
-        contract_draft: Contract draft to validate
-    
-    Returns:
-        tuple: (is_complete, missing_elements)
-    """
-    
-    missing_elements = []
-    
-    # Check buyer information
-    if not contract_draft.buyer.legal_name or contract_draft.buyer.legal_name == "Buyer Company":
-        missing_elements.append("Complete buyer legal name")
-    
-    if not contract_draft.buyer.address or "Address" in contract_draft.buyer.address:
-        missing_elements.append("Complete buyer address")
-    
-    # Check seller information  
-    if not contract_draft.seller.legal_name or contract_draft.seller.legal_name == "Supplier Company":
-        missing_elements.append("Complete seller legal name")
-    
-    # Check product specifications
-    if not contract_draft.product_specs.fabric_type:
-        missing_elements.append("Product specifications")
-    
-    if contract_draft.product_specs.quantity <= 0:
-        missing_elements.append("Valid quantity")
-    
-    # Check commercial terms
-    if contract_draft.commercial_terms.unit_price <= 0:
-        missing_elements.append("Valid unit price")
-    
-    if not contract_draft.commercial_terms.payment_terms:
-        missing_elements.append("Payment terms")
-    
-    # Check delivery terms
-    if not contract_draft.delivery_terms.delivery_destination:
-        missing_elements.append("Delivery destination")
-    
-    if contract_draft.delivery_terms.lead_time_days <= 0:
-        missing_elements.append("Valid lead time")
-    
-    is_complete = len(missing_elements) == 0
-    return is_complete, missing_elements
-
-def save_contract_draft(contract_draft: ContractDraft) -> str:
-    """
-    Save contract draft to secure storage location
-    
-    Args:
-        contract_draft: Contract draft to save
-    
-    Returns:
-        str: File path or storage identifier
-    """
-    
-    # In practice, this would save to a secure file system or database
-    # For demo purposes, we'll return a mock file path
-    file_path = f"contracts/drafts/{contract_draft.contract_id}.pdf"
-    
-    # Log the contract save operation
-    logger.info(f"Contract draft saved: {contract_draft.contract_id} -> {file_path}")
-    
-    return file_path
-
-def generate_contract_metadata(contract_draft: ContractDraft, state: AgentState) -> Dict[str, Any]:
-    """
-    Generate comprehensive metadata for contract tracking and management
-    
-    Args:
-        contract_draft: Generated contract draft
-        state: Current agent state
-    
-    Returns:
-        dict: Contract metadata for tracking and audit purposes
-    """
-    
-    return {
-        "contract_id": contract_draft.contract_id,
-        "creation_timestamp": contract_draft.creation_date,
-        "template_used": contract_draft.template_used,
-        "total_value": contract_draft.commercial_terms.total_value,
-        "currency": contract_draft.commercial_terms.currency,
-        "buyer_name": contract_draft.buyer.legal_name,
-        "seller_name": contract_draft.seller.legal_name,
-        "product_type": contract_draft.product_specs.fabric_type,
-        "quantity": contract_draft.product_specs.quantity,
-        "unit": contract_draft.product_specs.unit,
-        "delivery_date": contract_draft.delivery_terms.delivery_date,
-        "review_priority": contract_draft.review_priority,
-        "anomaly_score": contract_draft.anomalies.anomaly_score,
-        "requires_special_review": contract_draft.anomalies.anomaly_score > 0.3,
-        "session_id": state.get("session_id"),
-        "user_id": state.get("user_id"),
-        "negotiation_rounds": len(state.get("negotiation_history", [])),
-        "supplier_reliability": state.get("top_suppliers", [{}])[0].get("reliability_score", 0),
-        "contract_status": "draft_pending_review"
-    }
-
-# Enhanced contract templates with more sophisticated structure
-ENHANCED_TEMPLATES = {
-    "international_textile_comprehensive": {
-        "name": "Comprehensive International Textile Purchase Agreement",
-        "template": """
-INTERNATIONAL TEXTILE PURCHASE AGREEMENT
-
-Contract No: {contract_id}
-Date: {creation_date}
-
-PARTIES:
-
-BUYER:
-{buyer_name}
-{buyer_address}
-Contact: {buyer_contact}
-Email: {buyer_email}
-
-SELLER:
-{seller_name}  
-{seller_address}
-Contact: {seller_contact}
-Email: {seller_email}
-
-ARTICLE 1: PRODUCT SPECIFICATIONS
-1.1 Product: {fabric_type}
-1.2 Quantity: {quantity} {unit}
-1.3 Quality Standards: {quality_specs}
-1.4 Certifications Required: {certifications}
-1.5 Color/Pattern: {color_specs}
-1.6 Technical Specifications: {technical_specs}
-
-ARTICLE 2: COMMERCIAL TERMS
-2.1 Unit Price: {unit_price} {currency} per {unit}
-2.2 Total Contract Value: {total_value} {currency}
-2.3 Payment Terms: {payment_terms}
-2.4 Incoterms: {incoterms} 2020
-2.5 Currency: {currency}
-
-ARTICLE 3: DELIVERY AND LOGISTICS
-3.1 Delivery Destination: {delivery_destination}
-3.2 Delivery Timeline: {lead_time_days} days from order confirmation
-3.3 Expected Delivery Date: {delivery_date}
-3.4 Shipping Method: {shipping_method}
-3.5 Packaging Requirements: {packaging_requirements}
-
-ARTICLE 4: QUALITY ASSURANCE
-4.1 Inspection Period: 10 business days from delivery
-4.2 Quality Standards: Products must meet specifications in Article 1
-4.3 Rejection Rights: Buyer may reject non-conforming goods
-4.4 Warranty Period: 90 days from delivery date
-
-ARTICLE 5: SPECIAL CONDITIONS
-{special_clauses}
-
-ARTICLE 6: STANDARD TERMS
-6.1 Force Majeure: Standard international force majeure clause applies
-6.2 Governing Law: Contract governed by international commercial law
-6.3 Dispute Resolution: International arbitration in neutral jurisdiction
-6.4 Confidentiality: Both parties maintain confidentiality of terms
-
-ARTICLE 7: SIGNATURES
-This agreement becomes effective upon signature by both parties.
-
-BUYER SIGNATURE:                    SELLER SIGNATURE:
-_____________________              _____________________
-Name: {buyer_signatory}            Name: {seller_signatory}
-Title: {buyer_title}               Title: {seller_title}
-Date: _______________              Date: _______________
-
-Contract generated by AI Assistant on {creation_date}
-        """,
-        "required_fields": [
-            "contract_id", "buyer_name", "seller_name", "fabric_type", 
-            "quantity", "unit_price", "total_value", "delivery_destination"
-        ],
-        "standard_clauses": [
-            "quality_inspection", "warranty_period", "force_majeure", 
-            "governing_law", "arbitration", "confidentiality"
-        ],
-        "risk_factors": {
-            "international_shipping": "medium",
-            "currency_fluctuation": "medium", 
-            "quality_disputes": "low",
-            "delivery_delays": "medium"
-        }
-    }
-}
-
-# Integration functions for external systems
-def notify_legal_team(contract_draft: ContractDraft) -> bool:
-    """
-    Notify legal team of contract requiring review
-    
-    Args:
-        contract_draft: Contract requiring legal review
-    
-    Returns:
-        bool: Success status of notification
-    """
-    
-    # In practice, this would integrate with email/notification systems
-    logger.info(f"Legal team notified for contract {contract_draft.contract_id} - Priority: {contract_draft.review_priority}")
-    
-    if contract_draft.review_priority in ["high", "urgent"]:
-        # Send urgent notification
-        logger.info("URGENT: High-priority contract requires immediate legal review")
-    
-    return True
-
-def create_audit_trail(state: AgentState, contract_draft: ContractDraft) -> Dict[str, Any]:
-    """
-    Create comprehensive audit trail for contract generation process
-    
-    Args:
-        state: Current agent state
-        contract_draft: Generated contract draft
-    
-    Returns:
-        dict: Audit trail data
-    """
-    
-    return {
-        "process_id": state.get("session_id"),
-        "user_id": state.get("user_id"),
-        "contract_id": contract_draft.contract_id,
-        "generation_timestamp": datetime.now().isoformat(),
-        "template_used": contract_draft.template_used,
-        "data_sources": {
-            "original_request": bool(state.get("extracted_parameters")),
-            "negotiation_history": len(state.get("negotiation_history", [])),
-            "supplier_data": bool(state.get("top_suppliers")),
-            "user_profile": bool(state.get("user_profile"))
-        },
-        "validation_results": {
-            "completeness_check": True,  # Would be actual validation result
-            "anomalies_detected": contract_draft.anomalies.anomaly_score,
-            "review_priority": contract_draft.review_priority
-        },
-        "ai_confidence_scores": {
-            "data_aggregation": 0.95,  # Would be actual confidence scores
-            "template_selection": 0.98,
-            "contract_generation": 0.92,
-            "anomaly_detection": 0.88
-        }
-    }
-
-# Testing and validation functions
-def test_contract_generation():
-    """
-    Test function for validating contract generation with sample data
-    """
-    
-    # Sample test state
-    test_state = {
-        "extracted_parameters": {
-            "fabric_details": {
-                "type": "Organic Cotton Twill",
-                "quantity": 10000,
-                "unit": "meters",
-                "quality_specs": ["300 GSM", "GOTS Certified"],
-                "certifications": ["GOTS", "OEKO-TEX"]
-            },
-            "price_constraints": {
-                "max_price": 5.50,
-                "currency": "USD"
-            },
-            "logistics_details": {
-                "destination": "Los Angeles, CA, USA",
-                "timeline_days": 45
-            }
-        },
-        "top_suppliers": [{
-            "company_name": "Premium Textiles Ltd.",
-            "country": "India",
-            "city": "Mumbai",
-            "contact_person": "Rajesh Kumar",
-            "contact_info": {"email": "rajesh@premiumtextiles.com"},
-            "reliability_score": 8.5
-        }],
-        "negotiation_history": [{
-            "timestamp": datetime.now().isoformat(),
-            "round": 1,
-            "intent": "accept",
-            "terms": {
-                "new_price": 5.25,
-                "new_lead_time": 42,
-                "new_payment_terms": "30% advance, 70% on delivery"
-            }
-        }],
-        "user_profile": {
-            "legal_name": "Global Fashion Inc.",
-            "address": "456 Fashion Ave, New York, NY 10001, USA",
-            "contact_person": "Sarah Johnson, CPO",
-            "email": "sarah.johnson@globalfashion.com"
-        },
-        "session_id": "test_session_123",
-        "user_id": "user_456"
-    }
-    
-    try:
-        result = initiate_contract(test_state)
-        print("✅ Contract generation test passed")
-        print(f"Contract ID: {result.get('contract_id')}")
-        print(f"Review Priority: {result.get('review_priority')}")
-        print(f"Anomalies: {result.get('anomalies_detected', 0)}")
-        return True
-    except Exception as e:
-        print(f"❌ Contract generation test failed: {e}")
-        return False
-
-if __name__ == "__main__":
-    # Run test if module is executed directly
-    test_contract_generation()
+        return "low"

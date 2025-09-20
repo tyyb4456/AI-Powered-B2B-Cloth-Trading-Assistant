@@ -36,6 +36,7 @@ class ExtractedTerms(BaseModel):
     new_minimum_quantity: Optional[int] = Field(None, description="New minimum order quantity")
     new_payment_terms: Optional[str] = Field(None, description="Modified payment terms")
     new_incoterms: Optional[str] = Field(None, description="New shipping/delivery terms")
+    new_quantity : Optional[int] = Field(None, description="New quantity offered")
     quality_adjustments: Optional[str] = Field(None, description="Any quality specification changes")
     additional_conditions: List[str] = Field(
         default_factory=list, 

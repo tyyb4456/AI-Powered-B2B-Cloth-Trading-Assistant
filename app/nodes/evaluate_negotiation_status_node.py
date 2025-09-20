@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 def evaluate_negotiation_status(state: AgentState) -> Literal[
     "draft_negotiation_message", 
     "initiate_contract", 
-    # "notify_user_of_failure",
+    "notify_user_of_failure",
     # "provide_clarification",
     # "schedule_follow_up",
     # "escalate_to_human",
@@ -87,21 +87,21 @@ def evaluate_negotiation_status(state: AgentState) -> Literal[
             """
             
             # Enhanced routing logic for counteroffers
-            # routing_decision = handle_counteroffer_routing(state, negotiation_round, intent_confidence)
-            logger.info(f"📈 COUNTEROFFER: Continuing negotiation - routing to draft_negotiation_message")
+            routing_decision = handle_counteroffer_routing(state, negotiation_round, intent_confidence)
+            logger.info(f"📈 COUNTEROFFER: Continuing negotiation - routing to {routing_decision}")
             return 'draft_negotiation_message'
         
-        # elif intent == "reject":
-        #     """
-        #     PATHWAY 3: FAILURE - Supplier definitively rejects
+        elif intent == "reject":
+            """
+            PATHWAY 3: FAILURE - Supplier definitively rejects
             
-        #     Supplier declined offer without viable alternatives.
-        #     Negotiation has failed for this supplier.
+            Supplier declined offer without viable alternatives.
+            Negotiation has failed for this supplier.
             
-        #     Next Step: Handle failure scenario and suggest alternatives
-        #     """
-        #     logger.info("❌ REJECTION: Supplier rejected terms - routing to failure handler")
-        #     return "notify_user_of_failure"
+            Next Step: Handle failure scenario and suggest alternatives
+            """
+            logger.info("❌ REJECTION: Supplier rejected terms - routing to failure handler")
+            return "notify_user_of_failure"
         
         # elif intent == "clarification_request":
         #     """

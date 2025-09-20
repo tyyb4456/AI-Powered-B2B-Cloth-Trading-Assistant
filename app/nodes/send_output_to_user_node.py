@@ -59,6 +59,6 @@ def send_output_to_user(state: AgentState):
         "messages": [response],
         "quote_sent": True,
         "workflow_phase": "awaiting_negotiation",
-        "next_step": "wait_for_negotiation_input",
+        "next_step": "negotiate_quote",
         "status": "quote_sent_awaiting_negotiation"
     }

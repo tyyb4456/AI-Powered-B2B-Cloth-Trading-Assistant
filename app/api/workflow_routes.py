@@ -1,0 +1,295 @@
+from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
+from graph_builder import graph, Config, process_events
+import uuid
+
+router = APIRouter()
+
+# Store active sessions
+workflow_sessions = {}
+
+@router.get("/start")
+def start_workflow(
+    user_input: Optional[str] = Query(None, description="User input for the workflow"),
+    thread_id: Optional[str] = Query(None, description="Thread ID for the session"),
+    input_type: str = Query("quote", description="Type of input: 'quote' or 'negotiate'")
+):
+    """
+    GET endpoint to start the workflow - triggers the initial graph execution
+    Based on graph_builder.py run_workflow function
+    """
+    try:
+        # Use provided thread_id or generate new one
+        session_thread_id = thread_id or str(uuid.uuid4())
+        
+        # Determine input based on type
+        if input_type == "quote":
+            workflow_input = user_input or Config.DEFAULT_GET_QUOTE_INPUT
+        elif input_type == "negotiate":
+            workflow_input = user_input or Config.DEFAULT_NEGOTIATION_INPUT
+        else:
+            workflow_input = user_input or Config.DEFAULT_GET_QUOTE_INPUT
+            
+        config = {"configurable": {"thread_id": session_thread_id}}
+        
+        # Initial state setup matching graph_builder.py
+        initial_state = {
+            "user_input": workflow_input, 
+            "msgs": ['I want to get the response of the supplier, send the email to the specific supplier'],
+            "messages": ['please convert the document content into PDF and send it to the specific user, the email address is given'],
+            "status": "starting",
+            "session_id": session_thread_id
+        }
+        
+        # Execute the workflow
+        events = list(graph.stream(initial_state, config))
+        
+        # Process events and extract final state
+        final_state = {}
+        messages_log = []
+        
+        for event in events:
+            for step_name, step_data in event.items():
+                # Update final state with latest data
+                final_state.update(step_data)
+                
+                # Log messages for debugging
+                if "messages1" in step_data and step_data["messages1"]:
+                    messages_log.append({
+                        "step": step_name,
+                        "message": step_data["messages1"][-1]
+                    })
+        
+        # Store session for later access
+        workflow_sessions[session_thread_id] = {
+            "config": config,
+            "final_state": final_state,
+            "messages_log": messages_log
+        }
+        
+        return {
+            "session_id": session_thread_id,
+            "status": final_state.get("status", "completed"),
+            "intent": final_state.get("intent"),
+            "next_step": final_state.get("next_step"),
+            "messages_log": messages_log[-3:],  # Return last 3 messages
+            "workflow_completed": True,
+            "supplier_response_needed": final_state.get("next_step") == "analyze_supplier_response" or "draft_negotiation_message" in str(final_state.get("next_step", ""))
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Workflow start failed: {str(e)}")
+
+
+@router.get("/continue/{session_id}")
+def continue_workflow(
+    session_id: str,
+    supplier_response: str = Query(..., description="Supplier response to continue workflow")
+):
+    """
+    GET endpoint to continue workflow from existing state
+    Based on graph_builder.py Phase 2 implementation
+    """
+    # try:
+    if session_id not in workflow_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    session_data = workflow_sessions[session_id]
+    config = session_data["config"]
+    
+    # Update state with supplier response (matching graph_builder.py)
+    graph.update_state(config, {"supplier_response": supplier_response})
+    
+    # Continue workflow execution
+    events = list(graph.stream(None, config))
+    
+    # Process continuation events
+    final_state = session_data["final_state"].copy()
+    messages_log = session_data["messages_log"].copy()
+    
+    for event in events:
+        for step_name, step_data in event.items():
+            # Update final state
+            final_state.update(step_data)
+            
+            # Log new messages
+            if "messages1" in step_data and step_data["messages1"]:
+                messages_log.append({
+                    "step": step_name,
+                    "message": step_data["messages1"][-1]
+                })
+    
+    # Update stored session
+    workflow_sessions[session_id]["final_state"] = final_state
+    workflow_sessions[session_id]["messages_log"] = messages_log
+    
+    return {
+        "session_id": session_id,
+        "status": final_state.get("status", "continued"),
+        "supplier_response": supplier_response,
+        "analysis_complete": True,
+        "negotiation_status": final_state.get("negotiation_status"),
+        "next_action": final_state.get("next_step"),
+        "messages_log": messages_log[-3:],  # Last 3 messages
+        "contract_ready": final_state.get("contract_ready", False),
+        "escalation_required": final_state.get("escalation_required", False)
+    }
+        
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=f"Workflow continuation failed: {str(e)}")
+
+
+@router.get("/state/{session_id}")
+def get_workflow_state(session_id: str):
+    """
+    Get current state of workflow session
+    """
+    try:
+        if session_id not in workflow_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+            
+        session_data = workflow_sessions[session_id]
+        final_state = session_data["final_state"]
+        
+        return {
+            "session_id": session_id,
+            "status": final_state.get("status"),
+            "intent": final_state.get("intent"),
+            "intent_confidence": final_state.get("intent_confidence"),
+            "next_step": final_state.get("next_step"),
+            "extracted_parameters": final_state.get("extracted_parameters"),
+            "supplier_search_results": final_state.get("supplier_search_results"),
+            "generated_quote": final_state.get("generated_quote"),
+            "negotiation_status": final_state.get("negotiation_status"),
+            "contract_ready": final_state.get("contract_ready", False),
+            "escalation_summary": final_state.get("escalation_summary"),
+            "messages_count": len(session_data["messages_log"])
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get state: {str(e)}")
+
+
+@router.get("/history/{session_id}")
+def get_workflow_history(session_id: str):
+    """
+    Get full message history for workflow session
+    """
+    try:
+        if session_id not in workflow_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+            
+        session_data = workflow_sessions[session_id]
+        
+        return {
+            "session_id": session_id,
+            "messages_log": session_data["messages_log"],
+            "negotiation_history": session_data["final_state"].get("negotiation_history", []),
+            "total_messages": len(session_data["messages_log"])
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+
+@router.get("/replay/{session_id}")
+def replay_workflow(
+    session_id: str,
+    new_input_type: str = Query("negotiate", description="New input type for replay")
+):
+    """
+    Replay workflow with different input (matching graph_builder.py replay logic)
+    """
+    if session_id not in workflow_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    config = workflow_sessions[session_id]["config"]
+    
+    # Get state history to find replay point
+    state_history = list(graph.get_state_history(config))
+    
+    to_replay = None
+    for state in state_history:
+        if len(state.values.get("messages1", [])) == 2:
+            to_replay = state
+            break
+            
+    if not to_replay:
+        raise HTTPException(status_code=400, detail="No suitable replay state found")
+        
+    # Prepare new input
+    new_input = Config.DEFAULT_NEGOTIATION_INPUT if new_input_type == "negotiate" else Config.DEFAULT_GET_QUOTE_INPUT
+    
+    replay_state = {
+        "user_input": new_input, 
+        "msgs": ['I want to get the response of the supplier, send the email to the specific supplier'],
+        "messages": ['please convert the document content into PDF and send it to the specific user, the email address is given'],
+        "status": "starting"
+    }
+    
+    # Execute replay
+    events = list(graph.stream(replay_state, to_replay.config))
+    
+    # Process replay results
+    final_state = {}
+    messages_log = []
+    
+    for event in events:
+        # Ensure event is a dictionary
+        if not isinstance(event, dict):
+            continue
+            
+        for step_name, step_data in event.items():
+            # Ensure step_data is a dictionary before updating
+            if isinstance(step_data, dict):
+                final_state.update(step_data)
+                
+                # Process messages
+                if "messages1" in step_data and step_data["messages1"]:
+                    messages_log.append({
+                        "step": step_name,
+                        "message": step_data["messages1"][-1]
+                    })
+            else:
+                # Handle non-dict step_data
+                print(f"Warning: step_data for {step_name} is not a dict: {type(step_data)}")
+    
+    # Update session
+    workflow_sessions[session_id]["final_state"] = final_state
+    workflow_sessions[session_id]["messages_log"] = messages_log
+    
+    return {
+        "session_id": session_id,
+        "replay_completed": True,
+        "new_input_type": new_input_type,
+        "status": final_state.get("status"),
+        "intent": final_state.get("intent"),
+        "messages_log": messages_log[-3:] if messages_log else []
+    }
+    
+
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=f"Replay failed: {str(e)}")
+
+
+@router.delete("/session/{session_id}")
+def delete_session(session_id: str):
+    """
+    Clean up workflow session
+    """
+    if session_id in workflow_sessions:
+        del workflow_sessions[session_id]
+        return {"message": f"Session {session_id} deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@router.get("/sessions")
+def list_sessions():
+    """
+    List all active workflow sessions
+    """
+    return {
+        "active_sessions": list(workflow_sessions.keys()),
+        "total_sessions": len(workflow_sessions)
+    }

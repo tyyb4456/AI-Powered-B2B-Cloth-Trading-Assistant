@@ -1,4 +1,4 @@
-
+ 
 from typing import Dict, Any, List, Optional, Literal
 from datetime import datetime
 
@@ -267,7 +267,7 @@ def extract_negotiation_context(state: AgentState) -> Dict[str, Any]:
             'message_type': drafted_message.get('message_type', '')
         }
     
-    # Get original request parameters
+    # Get original request parameters 
     extracted_params = state.get('extracted_parameters', {})
     original_request = {
         'fabric_details': extracted_params.get('fabric_details', {}),
@@ -308,8 +308,6 @@ def analyze_supplier_response(state: AgentState) -> dict:
         dict: State updates with analysis, extracted terms, and strategic recommendations
     """
     
-    print(f"DEBUG: analyze_supplier_response node called!")
-    print(f"DEBUG: State keys: {list(state.keys())}")
     
     try:
         # Step 1: Extract supplier response and context
